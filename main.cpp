@@ -4,68 +4,72 @@
 #include <util/delay.h>
 #include <LiquidCrystal_I2C.h>
 
-const int stepPin = 6;
+byte Degree[8] =
+    {
+        0b00110,
+        0b01001,
+        0b01001,
+        0b00110,
+        0b00000,
+        0b00000,
+        0b00000,
+        0b00000};
 
-int val;
+const int stepPin = 6;
 
 int inputCLK = 2;
 
 int inputDT = 3;
 
-int speedCounter = 0;
-
 int prevCLK = LOW;
 int currentCLK;
 
-int n = LOW;
-
-int maxKnob = 20;
-
-int stepperSpeed = 2000;
-
-int maxSpeed = 600;
-
-int minSpeed = 2000;
-
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-int temp;
-int kp = 7;   // half of 14 = 7;//2;
-int ki = 0.7; // 0.4;
-int kd = 1;   // 14;  // 2;
+double temp;
+int lastTemp = 0;
+int lastOCR = 0;
+int kp = 125; // half of 14 = 7;//2;
+int ki = 8;   // 0.4;
+int kd = 5;   // 14;  // 2;
 int PID_p = 0;
 int PID_i = 0;
 int PID_d = 0;
-float last_kp = 0;
-float last_ki = 0;
-float last_kd = 0;
+int timerCount = 0;
 
 int val, cycleTimer, realTimeCounter;
 long R;
 double thermistor, outputVoltage, thermistorResistance;
 double pidError = 0, prevError = 0;
-double setTemp = 70;
+double setTemp = 240.0;
 double pidValue = 0;
 
 double time, prevTime, elapsedTime;
 
-void lcdDisplay()
+void tempDisplay()
 {
-  TIMSK1 = (1 << OCIE1A);
+  TIMSK2 = (1 << TOIE2);
   sei();
-  TCCR1B = (1 << CS12) | (1 << WGM12);
-  OCR1A = 12500;
-  // TCNT1 = 0;
 }
 
 void adc_init()
 {
   ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0); // enable ADC, and set pre scalar to 128
   DIDR0 = (1 << ADC0D);
-  ADMUX = (1 << REFS0);
+  ADMUX = (1 << REFS0) | (1 << MUX0) | (1 << MUX1);
   ADCSRA |= (1 << ADSC);
   while (ADCSRA & (1 << ADSC))
     ;
+}
+
+void stepperInit()
+{
+  DDRD |= (1 << PD6);
+  DDRB |= (1 << PB2);
+  PORTB |= (1 << PB2);
+  TCCR0A = (1 << COM0A0) | (1 << WGM01);
+  TCCR0B = (1 << CS02);
+  OCR0A = 25;
 }
 
 int get_adc()
@@ -99,13 +103,9 @@ double getTemp()
 
 void pidInit()
 {
-  DDRD = (1 << PD6);
-  TCCR0A = (1 << COM0A1) | (1 << WGM00) | (1 << WGM01);
-  // TIMSK0 = (1 << TOIE0);
-  // sei();
-  TCCR0B = (1 << CS00) | (1 << CS01);
-  // TCNT0 = 0;
-  // OCR0A = 0;
+  DDRB = (1 << PB3);
+  TCCR2A = (1 << COM2A1) | (1 << WGM20) | (1 << WGM21);
+  TCCR2B = (1 << CS22) | (1 << CS20) | (1 << CS21);
 
   time = millis(); // realTimeCounter + TCNT0;
 }
@@ -113,54 +113,35 @@ void pidInit()
 void pidController()
 {
   pidError = setTemp - getTemp();
-  PID_p = kp * pidError;
-  PID_i = PID_i + (ki * pidError);
-  // if (pidError > -3 && pidError < 3) {
-  // ki = 20;
-  // } // calculate Proportional value
-  // if(-3 < pidError <3)
-  // {
-  //   PID_i = PID_i + (ki * pidError);
-  // }
+  PID_p = 0.1 * kp * pidError;
+  PID_i = 0.1 * PID_i + (ki * pidError);
 
   prevTime = time;
   time = millis(); // realTimeCounter + TCNT0;
   elapsedTime = (time - prevTime) / 1000;
   // Now we can calculate the D calue
-  PID_d = kd * ((pidError - prevError) / elapsedTime);
-  //   if (PID_d < 0) {
-  //   PID_d = 0;
-  // } else if (PID_d > 255) {
-  //   PID_d = 255;
-  // }
+  PID_d = 0.1 * kd * ((pidError - prevError) / elapsedTime);
+
   // Final total PID value is the sum of P + I + D
   pidValue = PID_p + PID_i + PID_d;
 
-  OCR0A = pidValue;
+  OCR2A = pidValue;
 
   if (pidValue < 0)
   {
-    OCR0A = 0;
+    OCR2A = 0;
   }
   if (pidValue > 255)
   {
-    OCR0A = 255;
+    OCR2A = 255;
   }
 
   prevError = pidError;
 }
 
-void motorStep(int MAX)
+void rotaryInit()
 {
-  for (int x = 0; x < MAX; x++)
-  {
-
-    PORTD |= (1 << PD6);
-    delayMicroseconds(stepperSpeed);
-
-    PORTD &= ~(1 << PD6);
-    delayMicroseconds(stepperSpeed);
-  }
+  PORTD |= (1 << PD2) | (1 << PD3);
 }
 
 void rotaryInterrupt()
@@ -174,24 +155,64 @@ void setup()
 {
   lcd.init();
   lcd.backlight();
+
+  lcd.createChar(0, Degree);
   adc_init();
   pidInit();
-  DDRD |= (1 << PD6);
-  PORTD |= (1 << PD2) | (1 << PD3);
+  rotaryInit();
+  stepperInit();
+  tempDisplay();
 
   rotaryInterrupt();
+
+  temp = getTemp();
+
+  lcd.setCursor(4, 0);
+  lcd.print("PETAMEN");
+  lcd.setCursor(4, 1);
+  lcd.print("MACHINE");
+
+  _delay_ms(3000);
+  lcd.clear();
 }
 
 void loop()
 {
-  motorStep(1);
-  temp = getTemp();
   pidController();
   lcd.setCursor(0, 0);
   lcd.print("T: ");
 
-  lcd.setCursor(3, 0);
-  lcd.print(temp);
+  if (temp != lastTemp)
+  {
+    lcd.setCursor(3, 0);
+    lcd.print("       ");
+    lcd.setCursor(3, 0);
+    lcd.print(temp);
+
+    lastTemp = temp;
+  }
+
+  lcd.setCursor(9, 0);
+  lcd.print("/");
+  lcd.setCursor(10, 0);
+  lcd.print((uint16_t)setTemp);
+  lcd.setCursor(13, 0);
+  lcd.write(byte(0));
+  lcd.setCursor(14, 0);
+  lcd.print("C");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Speed:");
+
+  if (OCR0A != lastOCR)
+  {
+    lcd.setCursor(7, 1);
+    lcd.print("   ");
+    lcd.setCursor(7, 1);
+    lcd.print(255 - OCR0A);
+
+    lastOCR = OCR0A;
+  }
 }
 
 ISR(INT0_vect)
@@ -204,29 +225,33 @@ ISR(INT0_vect)
     if (digitalRead(inputDT) == LOW)
     {
 
-      speedCounter--;
+      OCR0A -= 2;
     }
     else
     {
 
-      speedCounter++;
+      OCR0A += 2;
     }
-    if (speedCounter > maxKnob)
+    if (OCR0A > 255)
     {
 
-      speedCounter = maxKnob;
+      OCR0A = 255;
     }
-    else if (speedCounter < 0)
+    else if (OCR0A < 0)
     {
 
-      speedCounter = 0;
+      OCR0A = 0;
     }
-    int r = speedCounter * 100;
-    r = minSpeed - r;
-    r = (r < maxSpeed) ? maxSpeed : r;
-    stepperSpeed = r;
-    Serial.println(r);
   }
+  prevCLK = LOW;
+}
 
-  prevCLK = n;
+ISR(TIMER2_OVF_vect)
+{
+  timerCount++;
+  if (timerCount == 91) // 61
+  {
+    timerCount = 0;
+    temp = getTemp();
+  }
 }
